@@ -142,7 +142,7 @@ func parseFanotifyEvents(buf []byte, mountFDMap map[[2]int32]int) (records []*sh
 			continue
 		}
 
-		objType := objectTypeFromStat(path)
+		objType, modTime := objectTypeFromStat(path)
 		// objectTypeFromStat returns ItemIsFile when the item is already gone.
 		// Use the FAN_ONDIR flag to correctly identify directory delete events.
 		if isDelete && mask&unix.FAN_ONDIR != 0 {
@@ -155,6 +155,7 @@ func parseFanotifyEvents(buf []byte, mountFDMap map[[2]int32]int) (records []*sh
 			ObjectType: objType,
 			EventID:    0,
 			EventTime:  time.Now().UnixNano(),
+			ModTime:    modTime,
 		}
 		records = append(records, rec)
 	}
@@ -241,28 +242,31 @@ func parseDFIDNamePath(info []byte, mountFDMap map[[2]int32]int) string {
 	return filepath.Join(dirPath, name)
 }
 
-// objectTypeFromStat returns the ObjectType for the given path using lstat.
-func objectTypeFromStat(path string) shared.ObjectType {
+// objectTypeFromStat returns the ObjectType and modification time (as a Unix
+// timestamp) for the given path using lstat. modTime is 0 if the path is
+// already gone (e.g. a delete event), since lstat then fails.
+func objectTypeFromStat(path string) (shared.ObjectType, int64) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return shared.ItemIsFile
+		return shared.ItemIsFile, 0
 	}
+	modTime := info.ModTime().Unix()
 	mode := info.Mode()
 	switch {
 	case mode.IsDir():
-		return shared.ItemIsDir
+		return shared.ItemIsDir, modTime
 	case mode&os.ModeSymlink != 0:
-		return shared.ItemIsSymlink
+		return shared.ItemIsSymlink, modTime
 	case mode&os.ModeNamedPipe != 0:
-		return shared.ItemIsNamedPipe
+		return shared.ItemIsNamedPipe, modTime
 	case mode&os.ModeSocket != 0:
-		return shared.ItemIsSocket
+		return shared.ItemIsSocket, modTime
 	case mode&os.ModeCharDevice != 0:
-		return shared.ItemIsCharDevice
+		return shared.ItemIsCharDevice, modTime
 	case mode&os.ModeDevice != 0:
-		return shared.ItemIsBlockDevice
+		return shared.ItemIsBlockDevice, modTime
 	default:
-		return shared.ItemIsFile
+		return shared.ItemIsFile, modTime
 	}
 }
 

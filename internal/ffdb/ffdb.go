@@ -26,6 +26,7 @@ var deleteStmt *sql.Stmt
 var deleteDirStmt *sql.Stmt
 var renameDirStmt *sql.Stmt
 var fullPathLikeStmt *sql.Stmt
+var updateModTimeIfUnsetStmt *sql.Stmt
 
 // Creates and opens a new database at the given pathname.
 func CreateDB(pathname string) (*sql.DB, error) {
@@ -58,9 +59,19 @@ func OpenDB(pathname string) (*sql.DB, error) {
 	}
 
 	configureDB(db)
+	migrateModTimeColumn(db)
 	prepareStatements(db)
 
 	return db, err
+}
+
+// Adds the mtime column to databases created before it existed. A no-op on
+// databases that already have it (including freshly-created ones).
+func migrateModTimeColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		log.Fatal(err)
+	}
 }
 
 // Open read-only for the UI.  Can't use PRAGMAS in read-only mode.
@@ -82,7 +93,7 @@ func OpenDBReadOnly(pathname string) (*sql.DB, error) {
 
 // Creates the necessary tables and indexes in the database.
 func createTablesAndIndexes(db *sql.DB) {
-	_, err := db.Exec("CREATE TABLE IF NOT EXISTS files(filename TEXT NOT NULL, fullpath TEXT NOT NULL UNIQUE, event_id INTEGER, object_type INTEGER)")
+	_, err := db.Exec("CREATE TABLE IF NOT EXISTS files(filename TEXT NOT NULL, fullpath TEXT NOT NULL UNIQUE, event_id INTEGER, object_type INTEGER, mtime INTEGER NOT NULL DEFAULT 0)")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -157,7 +168,12 @@ func prepareStatements(db *sql.DB) {
 		trigramSearchStmt = nil
 	}
 
-	insertStmt, err = db.Prepare("INSERT INTO files (filename, fullpath, event_id, object_type) VALUES (?, ?, ?, ?)")
+	insertStmt, err = db.Prepare("INSERT INTO files (filename, fullpath, event_id, object_type, mtime) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	updateModTimeIfUnsetStmt, err = db.Prepare("UPDATE files SET mtime = ? WHERE fullpath = ? AND mtime = 0")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -294,7 +310,7 @@ func BulkInsertRecords(db *sql.DB, filename string, path string) error {
 		}
 
 		for _, record := range records {
-			_, err = insertStmt.Exec(record.filename, record.path, nil, 0)
+			_, err = insertStmt.Exec(record.filename, record.path, nil, 0, 0)
 			if err != nil {
 				return err
 			}
@@ -389,10 +405,17 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 			continue
 		}
 		if e.FoundOnScan || shared.FileExists(e.Path) {
-			_, err = insertStmt.Exec(e.Filename, e.Path, e.EventID, e.ObjectType)
+			_, err = insertStmt.Exec(e.Filename, e.Path, e.EventID, e.ObjectType, e.ModTime)
 			if err != nil {
 				if isDuplicate(err) {
 					num_duplicate++
+					// Backfill mtime for rows that predate the mtime column
+					// (a no-op once every row has been backfilled once).
+					if e.ModTime != 0 {
+						if _, err = updateModTimeIfUnsetStmt.Exec(e.ModTime, e.Path); err != nil {
+							return err
+						}
+					}
 				} else {
 					return err
 				}

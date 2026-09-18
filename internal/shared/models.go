@@ -30,6 +30,7 @@ type EventRecord struct {
 	ObjectType  ObjectType
 	EventID     uint64
 	EventTime   int64
+	ModTime     int64
 	FoundOnScan bool
 	IsRename    bool
 }

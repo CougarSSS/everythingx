@@ -866,6 +866,83 @@ func TestBulkStoreEvents_DirRename(t *testing.T) {
 	assertCount(t, db, 5, "after rename")
 }
 
+// TestMigrateModTimeColumn verifies that OpenDB adds the mtime column to a
+// database created before it existed (simulating an upgrade from an older
+// everythingxd version), without touching existing data.
+func TestMigrateModTimeColumn(t *testing.T) {
+	testDBPath := "test.db"
+	os.Remove(testDBPath)
+
+	// Build a pre-mtime-column database by hand, bypassing createTablesAndIndexes.
+	rawDB, err := sql.Open("sqlite3", testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if _, err = rawDB.Exec("CREATE TABLE files(filename TEXT NOT NULL, fullpath TEXT NOT NULL UNIQUE, event_id INTEGER, object_type INTEGER)"); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if _, err = rawDB.Exec("INSERT INTO files (filename, fullpath) VALUES (?, ?)", "old.txt", "/path/to/old.txt"); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	rawDB.Close()
+	defer os.Remove(testDBPath)
+
+	db, err := OpenDB(testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	defer db.Close()
+
+	var mtime int64
+	row := db.QueryRow("SELECT mtime FROM files WHERE fullpath = ?", "/path/to/old.txt")
+	if err = row.Scan(&mtime); err != nil {
+		t.Fatalf("Expected mtime column to exist and be queryable, got %v", err)
+	}
+	if mtime != 0 {
+		t.Fatalf("Expected pre-existing row to default to mtime=0, got %d", mtime)
+	}
+}
+
+// TestBulkStoreEvents_BackfillsModTime verifies that rescanning a file already
+// in the DB (e.g. after upgrading to a version with the mtime column) fills
+// in its mtime instead of leaving it at the migration default of 0, and
+// without creating a duplicate row.
+func TestBulkStoreEvents_BackfillsModTime(t *testing.T) {
+	testDBPath := "test.db"
+	os.Remove(testDBPath)
+
+	db, err := CreateDB(testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(testDBPath)
+
+	// Simulate a row that predates the mtime column (mtime still 0).
+	if err = InsertRecord(db, "old.txt", "/tmp/old.txt", 0, shared.ItemIsFile); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	const wantModTime int64 = 1700000000
+	rescan := []shared.EventRecord{
+		{Filename: "old.txt", Path: "/tmp/old.txt", ObjectType: shared.ItemIsFile, ModTime: wantModTime, FoundOnScan: true},
+	}
+	if err = BulkStoreEvents(db, &rescan); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	assertCount(t, db, 1, "after rescanning an existing row")
+
+	var mtime int64
+	row := db.QueryRow("SELECT mtime FROM files WHERE fullpath = ?", "/tmp/old.txt")
+	if err = row.Scan(&mtime); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if mtime != wantModTime {
+		t.Fatalf("Expected mtime backfilled to %d, got %d", wantModTime, mtime)
+	}
+}
+
 func assertCount(t *testing.T, db *sql.DB, expected int, context string) {
 	t.Helper()
 	count := countAll(t, db)

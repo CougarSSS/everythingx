@@ -260,12 +260,18 @@ func scanDisk(path string, skipPath string) {
 			log.Printf("Unknown file type: %s", path)
 		}
 
+		var modTime int64
+		if info, err := file.Info(); err == nil {
+			modTime = info.ModTime().Unix()
+		}
+
 		eventRecord := &shared.EventRecord{
 			Filename:    file.Name(),
 			Path:        path,
 			ObjectType:  objType,
 			EventID:     0,
 			EventTime:   0,
+			ModTime:     modTime,
 			FoundOnScan: true,
 		}
 
