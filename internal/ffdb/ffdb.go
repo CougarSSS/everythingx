@@ -26,7 +26,7 @@ var deleteStmt *sql.Stmt
 var deleteDirStmt *sql.Stmt
 var renameDirStmt *sql.Stmt
 var fullPathLikeStmt *sql.Stmt
-var updateModTimeIfUnsetStmt *sql.Stmt
+var updateModTimeStmt *sql.Stmt
 
 // Creates and opens a new database at the given pathname.
 func CreateDB(pathname string) (*sql.DB, error) {
@@ -173,7 +173,7 @@ func prepareStatements(db *sql.DB) {
 		log.Fatal(err)
 	}
 
-	updateModTimeIfUnsetStmt, err = db.Prepare("UPDATE files SET mtime = ? WHERE fullpath = ? AND mtime = 0")
+	updateModTimeStmt, err = db.Prepare("UPDATE files SET mtime = ? WHERE fullpath = ? AND mtime != ?")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -409,10 +409,11 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 			if err != nil {
 				if isDuplicate(err) {
 					num_duplicate++
-					// Backfill mtime for rows that predate the mtime column
-					// (a no-op once every row has been backfilled once).
+					// Refresh mtime on rows that already exist: backfills rows that
+					// predate the mtime column and corrects values that went stale
+					// (in-place writes, utimes). Rows already up to date are untouched.
 					if e.ModTime != 0 {
-						if _, err = updateModTimeIfUnsetStmt.Exec(e.ModTime, e.Path); err != nil {
+						if _, err = updateModTimeStmt.Exec(e.ModTime, e.Path, e.ModTime); err != nil {
 							return err
 						}
 					}

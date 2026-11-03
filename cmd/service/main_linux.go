@@ -118,7 +118,11 @@ func parseFanotifyEvents(buf []byte, mountFDMap map[[2]int32]int) (records []*sh
 		isCreate := mask&unix.FAN_CREATE != 0 || mask&unix.FAN_MOVED_TO != 0
 		isDelete := mask&unix.FAN_DELETE != 0 || mask&unix.FAN_MOVED_FROM != 0
 
-		if !isCreate && !isDelete {
+		// Attribute changes and closed writes only arrive with --watch_mtime.
+		// They are stored like a create, which refreshes an existing row's mtime.
+		isModify := mask&(unix.FAN_ATTRIB|unix.FAN_CLOSE_WRITE) != 0
+
+		if !isCreate && !isDelete && !isModify {
 			continue
 		}
 
@@ -517,6 +521,10 @@ func main() {
 	// FID plus the filename in each event, allowing path reconstruction without
 	// keeping a watch table for every directory.
 	watchMask := uint64(unix.FAN_CREATE | unix.FAN_DELETE | unix.FAN_MOVED_FROM | unix.FAN_MOVED_TO | unix.FAN_ONDIR)
+	if config.WatchMtime {
+		watchMask |= unix.FAN_ATTRIB | unix.FAN_CLOSE_WRITE
+		log.Println("--watch_mtime is enabled: watching attribute changes and closed writes.")
+	}
 	fd, mountFDMap, err := setupFanotify(watchMask)
 	if err != nil {
 		log.Fatal(err)

@@ -943,6 +943,46 @@ func TestBulkStoreEvents_BackfillsModTime(t *testing.T) {
 	}
 }
 
+// TestBulkStoreEvents_RefreshesStaleModTime verifies that a row whose mtime
+// went stale (file rewritten in place or its times changed) gets the current
+// value on the next scan or modify event.
+func TestBulkStoreEvents_RefreshesStaleModTime(t *testing.T) {
+	testDBPath := "test_stale.db"
+	os.Remove(testDBPath)
+
+	db, err := CreateDB(testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(testDBPath)
+
+	first := []shared.EventRecord{
+		{Filename: "a.zip", Path: "/tmp/a.zip", ObjectType: shared.ItemIsFile, ModTime: 1700000000, FoundOnScan: true},
+	}
+	if err = BulkStoreEvents(db, &first); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	const wantModTime int64 = 1800000000
+	again := []shared.EventRecord{
+		{Filename: "a.zip", Path: "/tmp/a.zip", ObjectType: shared.ItemIsFile, ModTime: wantModTime, FoundOnScan: true},
+	}
+	if err = BulkStoreEvents(db, &again); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	assertCount(t, db, 1, "after refreshing an existing row")
+
+	var mtime int64
+	if err = db.QueryRow("SELECT mtime FROM files WHERE fullpath = ?", "/tmp/a.zip").Scan(&mtime); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if mtime != wantModTime {
+		t.Fatalf("Expected stale mtime refreshed to %d, got %d", wantModTime, mtime)
+	}
+}
+
 func assertCount(t *testing.T, db *sql.DB, expected int, context string) {
 	t.Helper()
 	count := countAll(t, db)

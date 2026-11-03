@@ -28,6 +28,7 @@ type Config struct {
 	DBPath      string
 	NoCache     bool
 	Verbose     bool
+	WatchMtime  bool
 }
 
 var config Config
@@ -39,6 +40,7 @@ func getCommandLineArgs() Config {
 	flag.StringVar(&config.DBPath, "db_path", "/var/lib/everythingx/files.db", "Path to the database file")
 	flag.BoolVar(&config.NoCache, "nocache", false, "Disable caching")
 	flag.BoolVar(&config.Verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&config.WatchMtime, "watch_mtime", false, "Also watch attribute changes and closed writes to keep mtime current (Linux)")
 	flag.BoolVar(&showVersion, "version", false, "Display version information and exit")
 	flag.Parse()
 
