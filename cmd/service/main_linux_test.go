@@ -51,10 +51,11 @@ func TestParseFanotifyEventsOverflow(t *testing.T) {
 	}
 	buf := unsafe.Slice((*byte)(unsafe.Pointer(&event)), int(unsafe.Sizeof(event)))
 
-	records, overflowed := parseFanotifyEvents(buf, nil)
+	records, movedInDirs, overflowed := parseFanotifyEvents(buf, nil)
 
 	assert.True(t, overflowed, "expected overflowed=true for a FAN_Q_OVERFLOW event")
 	assert.Empty(t, records, "an overflow marker alone should not produce file records")
+	assert.Empty(t, movedInDirs, "an overflow marker alone should not report moved folders")
 }
 
 // dfidNameRecord builds a synthetic DFID_NAME info record for the given handle
