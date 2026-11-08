@@ -151,6 +151,9 @@ func parseFanotifyEvents(buf []byte, mountFDMap map[[2]int32]int) (records []*sh
 			EventID:    0,
 			EventTime:  time.Now().UnixNano(),
 			ModTime:    modTime,
+			// A merged event with both create and delete bits is ambiguous;
+			// leave it to the existence check at flush time.
+			IsDelete: isDelete && !isCreate,
 		}
 		records = append(records, rec)
 	}
