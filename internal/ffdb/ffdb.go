@@ -321,9 +321,11 @@ func BulkInsertRecords(db *sql.DB, filename string, path string) error {
 		if err != nil {
 			return err
 		}
+		defer tx.Rollback()
 
+		txInsert := tx.Stmt(insertStmt)
 		for _, record := range records {
-			_, err = insertStmt.Exec(record.filename, record.path, nil, 0, 0)
+			_, err = txInsert.Exec(record.filename, record.path, nil, 0, 0)
 			if err != nil {
 				return err
 			}
@@ -351,6 +353,7 @@ func CommitRecords(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 
 	stmt, err := tx.Prepare("INSERT INTO files (filename, fullpath) VALUES (?, ?)")
 	if err != nil {
@@ -386,6 +389,17 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 	if err != nil {
 		return err
 	}
+	// Rolls back on any early return; a no-op once Commit has succeeded.
+	defer tx.Rollback()
+
+	// The package-level statements are prepared on the *sql.DB. Executing
+	// them directly would take another pooled connection and autocommit each
+	// row, so bind them to this transaction instead.
+	txInsert := tx.Stmt(insertStmt)
+	txDelete := tx.Stmt(deleteStmt)
+	txDeleteDir := tx.Stmt(deleteDirStmt)
+	txRenameDir := tx.Stmt(renameDirStmt)
+	txUpdateModTime := tx.Stmt(updateModTimeStmt)
 
 	var num_committed, num_missing, num_duplicate, num_deleted, num_renamed int
 
@@ -401,7 +415,7 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 		for j := i + 1; j < len(*eventRecordQueue); j++ {
 			ej := (*eventRecordQueue)[j]
 			if ej.IsRename && ej.ObjectType == shared.ItemIsDir && !handled[j] && shared.FileExists(ej.Path) {
-				_, err = renameDirStmt.Exec(ej.Path, e.Path, e.Path, ej.Filename, e.Path, e.Path+"/", e.Path+"0")
+				_, err = txRenameDir.Exec(ej.Path, e.Path, e.Path, ej.Filename, e.Path, e.Path+"/", e.Path+"0")
 				if err != nil {
 					return err
 				}
@@ -423,7 +437,7 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 		// old object's rows alive under it.
 		if !e.IsDelete && (e.FoundOnScan || shared.FileExists(e.Path)) {
 			modTime := currentModTime(e.Path, e.ModTime)
-			_, err = insertStmt.Exec(e.Filename, e.Path, e.EventID, e.ObjectType, modTime)
+			_, err = txInsert.Exec(e.Filename, e.Path, e.EventID, e.ObjectType, modTime)
 			if err != nil {
 				if isDuplicate(err) {
 					num_duplicate++
@@ -431,7 +445,7 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 					// predate the mtime column and corrects values that went stale
 					// (in-place writes, utimes). Rows already up to date are untouched.
 					if modTime != 0 {
-						if _, err = updateModTimeStmt.Exec(modTime, e.Path, modTime); err != nil {
+						if _, err = txUpdateModTime.Exec(modTime, e.Path, modTime); err != nil {
 							return err
 						}
 					}
@@ -444,12 +458,12 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 			if e.ObjectType == shared.ItemIsDir {
 				if e.IsRename {
 					// Unpaired rename: just remove the dir entry, don't cascade.
-					_, err = deleteStmt.Exec(e.Path)
+					_, err = txDelete.Exec(e.Path)
 				} else {
-					_, err = deleteDirStmt.Exec(e.Path, e.Path+"/", e.Path+"0")
+					_, err = txDeleteDir.Exec(e.Path, e.Path+"/", e.Path+"0")
 				}
 			} else {
-				_, err = deleteStmt.Exec(e.Path)
+				_, err = txDelete.Exec(e.Path)
 			}
 			if err != nil {
 				return err
