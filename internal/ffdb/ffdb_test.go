@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AlanKK/everythingx/internal/shared"
 )
@@ -1068,4 +1069,75 @@ func TestBulkStoreEvents_ExistenceCheckWithoutDeleteFlag(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 	assertCount(t, db, 1, "existing path without IsDelete is inserted")
+}
+
+// TestBulkStoreEvents_UsesCurrentModTime covers a scan record that read the
+// mtime before the file was written again: the value stored must be the one
+// on disk at flush time, not the stale value carried by the record.
+func TestBulkStoreEvents_UsesCurrentModTime(t *testing.T) {
+	testDBPath := "test_current_mtime.db"
+	os.Remove(testDBPath)
+
+	db, err := CreateDB(testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	defer db.Close()
+	defer os.Remove(testDBPath)
+
+	file := filepath.Join(t.TempDir(), "a.zip")
+	if err = os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	onDisk := time.Unix(1800000000, 0)
+	if err = os.Chtimes(file, onDisk, onDisk); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	for _, stale := range []int64{1700000000, 1600000000} { // first insert, then the duplicate path
+		records := []shared.EventRecord{
+			{Filename: "a.zip", Path: file, ObjectType: shared.ItemIsFile, ModTime: stale, FoundOnScan: true},
+		}
+		if err = BulkStoreEvents(db, &records); err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+		var mtime int64
+		if err = db.QueryRow("SELECT mtime FROM files WHERE fullpath = ?", file).Scan(&mtime); err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+		if mtime != onDisk.Unix() {
+			t.Fatalf("Expected the on-disk mtime %d, got %d (record carried %d)", onDisk.Unix(), mtime, stale)
+		}
+	}
+}
+
+// TestOpenDBReadOnlyBeforeMtimeMigration covers ev/the GUI opening a database
+// created before the mtime column existed, before the daemon has migrated it.
+func TestOpenDBReadOnlyBeforeMtimeMigration(t *testing.T) {
+	testDBPath := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite3", testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if _, err = raw.Exec("CREATE TABLE files(filename TEXT NOT NULL, fullpath TEXT NOT NULL UNIQUE, event_id INTEGER, object_type INTEGER)"); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if _, err = raw.Exec("INSERT INTO files VALUES ('old.txt', '/path/to/old.txt', 0, 0)"); err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	raw.Close()
+
+	db, err := OpenDBReadOnly(testDBPath)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	defer db.Close()
+
+	results, err := PrefixSearch("old", 10)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result from the read-only search, got %d", len(results))
+	}
 }

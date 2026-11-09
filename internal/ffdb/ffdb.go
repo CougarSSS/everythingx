@@ -86,7 +86,7 @@ func OpenDBReadOnly(pathname string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	prepareStatements(db)
+	prepareReadStatements(db)
 
 	return db, err
 }
@@ -154,6 +154,15 @@ func configureDB(db *sql.DB) {
 
 // Prepares the SQL statements for later use.
 func prepareStatements(db *sql.DB) {
+	prepareReadStatements(db)
+	prepareWriteStatements(db)
+}
+
+// prepareReadStatements prepares only the queries that search clients use, so
+// a read-only client (ev, the GUI) can open a database whose schema predates
+// columns the write statements reference (e.g. mtime before the daemon has
+// migrated it).
+func prepareReadStatements(db *sql.DB) {
 	var err error
 
 	prefixSearchStmt, err = db.Prepare("SELECT fullpath, object_type FROM files WHERE filename LIKE ? COLLATE BINARY ORDER BY filename ASC LIMIT ?")
@@ -167,6 +176,15 @@ func prepareStatements(db *sql.DB) {
 		log.Printf("Warning: could not prepare trigram search statement: %v", err)
 		trigramSearchStmt = nil
 	}
+
+	fullPathLikeStmt, err = db.Prepare("SELECT fullpath FROM files where fullpath like ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func prepareWriteStatements(db *sql.DB) {
+	var err error
 
 	insertStmt, err = db.Prepare("INSERT INTO files (filename, fullpath, event_id, object_type, mtime) VALUES (?, ?, ?, ?, ?)")
 	if err != nil {
@@ -189,11 +207,6 @@ func prepareStatements(db *sql.DB) {
 	}
 
 	renameDirStmt, err = db.Prepare("UPDATE files SET fullpath = ? || SUBSTR(fullpath, LENGTH(?) + 1), filename = CASE WHEN fullpath = ? THEN ? ELSE filename END WHERE fullpath = ? OR (fullpath > ? AND fullpath < ?)")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fullPathLikeStmt, err = db.Prepare("SELECT fullpath FROM files where fullpath like ?")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -409,15 +422,16 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 		// taken the path since (mv A B; mv C A) and would otherwise keep the
 		// old object's rows alive under it.
 		if !e.IsDelete && (e.FoundOnScan || shared.FileExists(e.Path)) {
-			_, err = insertStmt.Exec(e.Filename, e.Path, e.EventID, e.ObjectType, e.ModTime)
+			modTime := currentModTime(e.Path, e.ModTime)
+			_, err = insertStmt.Exec(e.Filename, e.Path, e.EventID, e.ObjectType, modTime)
 			if err != nil {
 				if isDuplicate(err) {
 					num_duplicate++
 					// Refresh mtime on rows that already exist: backfills rows that
 					// predate the mtime column and corrects values that went stale
 					// (in-place writes, utimes). Rows already up to date are untouched.
-					if e.ModTime != 0 {
-						if _, err = updateModTimeStmt.Exec(e.ModTime, e.Path, e.ModTime); err != nil {
+					if modTime != 0 {
+						if _, err = updateModTimeStmt.Exec(modTime, e.Path, modTime); err != nil {
 							return err
 						}
 					}
@@ -476,6 +490,20 @@ func BulkStoreEvents(db *sql.DB, eventRecordQueue *[]shared.EventRecord) error {
 }
 
 // Checks if the given error is a SQLite constraint violation error.
+// currentModTime returns the path's mtime as it is now, falling back to the
+// value carried by the record if the path cannot be stat'ed. A record can sit
+// in the queue (or be blocked sending to it) for a while, and a scan record
+// read before a later write would otherwise overwrite the newer mtime that
+// the write's own event stored. Comparing values instead would reject
+// legitimate older timestamps, such as an SMB copy restoring the source time.
+func currentModTime(path string, recorded int64) int64 {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return recorded
+	}
+	return info.ModTime().Unix()
+}
+
 func isDuplicate(err error) bool {
 	if sqliteErr, ok := err.(sqlite3.Error); ok && sqliteErr.Code == sqlite3.ErrConstraint {
 		return true
