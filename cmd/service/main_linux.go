@@ -132,7 +132,14 @@ func parseFanotifyEvents(buf []byte, mountFDMap map[[2]int32]int) (records []*sh
 			continue
 		}
 
-		objType, modTime := objectTypeFromStat(path)
+		// For a pure delete the path is either gone or already taken by a new
+		// object, so lstat says nothing about what was removed; FAN_ONDIR
+		// below is the only reliable signal. Otherwise a file replaced by a
+		// directory of the same name would be deleted as a directory.
+		objType, modTime := shared.ItemIsFile, int64(0)
+		if !(isDelete && !isCreate) {
+			objType, modTime = objectTypeFromStat(path)
+		}
 		// objectTypeFromStat returns ItemIsFile when the item is already gone
 		// (deleted, or renamed again before we got here). FAN_ONDIR is set by
 		// the kernel for any directory event, so trust it over lstat.
