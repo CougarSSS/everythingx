@@ -12,8 +12,8 @@ import (
 
 // Names that differ only in characters NFKC folds together.
 const (
-	nameFullComma = "十年目、帰還を諦めた転移者 v01.zip" // U+3001
-	nameHalfComma = "十年目､帰還を諦めた転移者 v02.zip" // U+FF64
+	nameFullComma = "春の庭、小さな約束 v01.zip" // U+3001
+	nameHalfComma = "春の庭､小さな約束 v02.zip" // U+FF64
 )
 
 func searchNames(t *testing.T, term string) []string {
@@ -55,10 +55,11 @@ func assertFTSIntact(t *testing.T, db *sql.DB) {
 
 func TestSearchName(t *testing.T) {
 	cases := map[string]string{
-		"十年目､帰還":    "十年目、帰還",
-		"ｶﾞﾝﾀﾞﾑ":    "ガンダム",
-		"ＡＢＣ１２３":    "ABC123",
-		"plain.zip": "plain.zip",
+		"春の庭､小さな":     "春の庭、小さな",
+		"ｶﾀｶﾅ":        "カタカナ",
+		"Ｒｅｐｏｒｔ ２０２６": "Report 2026",
+		"cafe\u0301":  "caf\u00e9", // decomposed (NFD) -> composed
+		"plain.zip":   "plain.zip",
 	}
 	for in, want := range cases {
 		if got := SearchName(in); got != want {
@@ -77,18 +78,24 @@ func TestSearch_MatchesAcrossWidthVariants(t *testing.T) {
 	events := []shared.EventRecord{
 		{Filename: nameFullComma, Path: "/x/" + nameFullComma, ObjectType: shared.ItemIsFile, FoundOnScan: true},
 		{Filename: nameHalfComma, Path: "/x/" + nameHalfComma, ObjectType: shared.ItemIsFile, FoundOnScan: true},
-		{Filename: "ｶﾞﾝﾀﾞﾑ.zip", Path: "/x/ｶﾞﾝﾀﾞﾑ.zip", ObjectType: shared.ItemIsFile, FoundOnScan: true},
-		{Filename: "ＡＢＣ.txt", Path: "/x/ＡＢＣ.txt", ObjectType: shared.ItemIsFile, FoundOnScan: true},
+		{Filename: "ｶﾀｶﾅ.zip", Path: "/x/ｶﾀｶﾅ.zip", ObjectType: shared.ItemIsFile, FoundOnScan: true},
+		{Filename: "Report 2026.pdf", Path: "/x/Report 2026.pdf", ObjectType: shared.ItemIsFile, FoundOnScan: true},
+		{Filename: "Ｒｅｐｏｒｔ ２０２６.pdf", Path: "/x/Ｒｅｐｏｒｔ ２０２６.pdf", ObjectType: shared.ItemIsFile, FoundOnScan: true},
+		{Filename: "caf\u00e9 menu.txt", Path: "/x/caf\u00e9 menu.txt", ObjectType: shared.ItemIsFile, FoundOnScan: true},
+		{Filename: "cafe\u0301 menu.txt", Path: "/x/cafe\u0301 menu.txt", ObjectType: shared.ItemIsFile, FoundOnScan: true},
 	}
 	if err = BulkStoreEvents(db, &events); err != nil {
 		t.Fatal(err)
 	}
 
-	assertNames(t, "十年目、帰還", nameFullComma, nameHalfComma)
-	assertNames(t, "十年目､帰還", nameFullComma, nameHalfComma)
-	assertNames(t, "ガンダム", "ｶﾞﾝﾀﾞﾑ.zip")
-	assertNames(t, "abc", "ＡＢＣ.txt")
-	assertNames(t, "AB", "ＡＢＣ.txt") // short term: prefix search
+	assertNames(t, "春の庭、小さな", nameFullComma, nameHalfComma)
+	assertNames(t, "春の庭､小さな", nameFullComma, nameHalfComma)
+	assertNames(t, "カタカナ", "ｶﾀｶﾅ.zip")
+	assertNames(t, "Report 2026", "Report 2026.pdf", "Ｒｅｐｏｒｔ ２０２６.pdf")
+	assertNames(t, "report", "Report 2026.pdf", "Ｒｅｐｏｒｔ ２０２６.pdf")
+	assertNames(t, "Re", "Report 2026.pdf", "Ｒｅｐｏｒｔ ２０２６.pdf") // short term: prefix search
+	assertNames(t, "caf\u00e9", "caf\u00e9 menu.txt", "cafe\u0301 menu.txt")
+	assertNames(t, "cafe\u0301", "caf\u00e9 menu.txt", "cafe\u0301 menu.txt")
 	// The stored filename keeps its original spelling for display.
 	var stored string
 	if err = db.QueryRow("SELECT filename FROM files WHERE fullpath = ?", "/x/"+nameHalfComma).Scan(&stored); err != nil || stored != nameHalfComma {
@@ -106,7 +113,7 @@ func TestSearch_DirRenameUpdatesSearchName(t *testing.T) {
 	defer db.Close()
 
 	oldDir := filepath.Join(root, "old_ｶﾞ")
-	newDir := filepath.Join(root, "十年目､帰還を諦めた")
+	newDir := filepath.Join(root, "春の庭､小さな約束")
 	scan := []shared.EventRecord{
 		{Filename: filepath.Base(oldDir), Path: oldDir, ObjectType: shared.ItemIsDir, FoundOnScan: true},
 		{Filename: "v01.zip", Path: oldDir + "/v01.zip", ObjectType: shared.ItemIsFile, FoundOnScan: true},
@@ -125,7 +132,7 @@ func TestSearch_DirRenameUpdatesSearchName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertNames(t, "十年目、帰還を", filepath.Base(newDir))
+	assertNames(t, "春の庭、小さな", filepath.Base(newDir))
 	assertNames(t, "old_ガ")
 	assertNames(t, "v01.zip", "v01.zip")
 	assertFTSIntact(t, db)
@@ -143,7 +150,7 @@ func TestSearch_MtimeRefreshKeepsIndex(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	assertNames(t, "十年目、帰還", nameHalfComma)
+	assertNames(t, "春の庭、小さな", nameHalfComma)
 	assertFTSIntact(t, db)
 }
 
@@ -186,7 +193,7 @@ func TestMigrateSearchName_FromR9Schema(t *testing.T) {
 	if searchNameEnabled {
 		t.Fatal("search_name enabled on an unmigrated database")
 	}
-	assertNames(t, "十年目、帰還", nameFullComma)
+	assertNames(t, "春の庭、小さな", nameFullComma)
 	ro.Close()
 
 	db, err := OpenDB(path)
@@ -196,7 +203,7 @@ func TestMigrateSearchName_FromR9Schema(t *testing.T) {
 	if !searchNameEnabled {
 		t.Fatal("search_name not enabled after migration")
 	}
-	assertNames(t, "十年目、帰還", nameFullComma, nameHalfComma)
+	assertNames(t, "春の庭、小さな", nameFullComma, nameHalfComma)
 	assertNames(t, "plain", "plain.zip")
 	var mtime int64
 	if err = db.QueryRow("SELECT mtime FROM files WHERE filename = 'plain.zip'").Scan(&mtime); err != nil || mtime != 123 {
@@ -217,7 +224,7 @@ func TestMigrateSearchName_FromR9Schema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ro.Close()
-	assertNames(t, "十年目､帰還", nameFullComma, nameHalfComma)
+	assertNames(t, "春の庭､小さな", nameFullComma, nameHalfComma)
 }
 
 // A row written by an older binary after a rollback has an empty search_name;
@@ -238,6 +245,6 @@ func TestMigrateSearchName_BackfillsEmptyRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	assertNames(t, "十年目、帰還", nameHalfComma)
+	assertNames(t, "春の庭、小さな", nameHalfComma)
 	assertFTSIntact(t, db)
 }
